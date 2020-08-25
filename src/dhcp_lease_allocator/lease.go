@@ -1,13 +1,11 @@
 package dhcp_lease_allocator
 
 import (
-	"fmt"
 	"net"
-	"os"
-	"os/exec"
 
+	"github.com/openshift/assisted-installer-agent/src/util"
 	"github.com/openshift/baremetal-runtimecfg/pkg/monitor"
-	"github.com/openshift/baremetal-runtimecfg/pkg/utils"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -30,47 +28,14 @@ func LeaseVIP(log logrus.FieldLogger, cfgPath, masterDevice, name string, mac ne
 
 	leaseFile := monitor.GetLeaseFile(cfgPath, name)
 
-	if f, err := os.OpenFile(leaseFile, os.O_RDWR|os.O_CREATE, 0666); err != nil {
-		log.WithFields(logrus.Fields{
-			"name": leaseFile,
-		}).WithError(err).Error("Failed to create lease file")
-		return err
-	} else {
-		f.Close()
-	}
-
-	watcher, err := utils.CreateFileWatcher(log, leaseFile)
-
-	if err != nil {
-		log.WithFields(logrus.Fields{
-			"filename": leaseFile,
-		}).WithError(err).Error("Failed to create a watcher for lease file")
-		return err
-	}
-
 	// -sf avoiding dhclient from setting the received IP to the interface
 	// --no-pid in order to allow running multiple `dhclient` simultaneously
 	// -pf allow killing the process
-	cmd := exec.Command("dhclient", "-v", iface.Name, "-H", name,
-		"-sf", "/bin/true", "-lf", leaseFile, "-d",
-		"--no-pid", "-pf", fmt.Sprintf("/var/run/dhclient.%s.pid", iface.Name))
-	cmd.Stderr = os.Stderr
-
-	write := make(chan error)
-	defer close(write)
-
-	monitor.RunFiniteWatcher(log, watcher, leaseFile, iface.Name, ip, write)
-
-	if err := cmd.Start(); err != nil {
-		log.WithFields(logrus.Fields{
-			"cmd": cmd.Args,
-		}).WithError(err).Error("Failed to execute")
-		return err
+	_, stderr, exitCode := util.Execute("timeout", "5", "dhclient", "-v", "-H", name,
+		"-sf", "/bin/true", "-lf", leaseFile,
+		"--no-pid", "-1", iface.Name)
+	if exitCode != 0 {
+		return errors.Errorf("dhclient existed with non-zero exit code %d: %s", exitCode, stderr)
 	}
-
-	if err := <-write; err != nil {
-		return err
-	}
-
-	return cmd.Process.Kill()
+	return nil
 }
